@@ -5,11 +5,22 @@ Un éditeur PDF simple, avec une interface graphique et une ligne de commande :
 - **ajouter du texte** n'importe où sur une page (taille et couleur au choix, plusieurs lignes possibles) ;
 - **signer** : dessiner sa signature à la souris ou importer une image ;
 - **fusionner** plusieurs PDF ;
-- **modifier le texte existant** : cliquer sur un texte pour le réécrire, ou rechercher/remplacer dans tout le document.
+- **modifier le texte existant** : cliquer sur un texte pour le réécrire, ou rechercher/remplacer dans tout le document ;
+- **remplir les formulaires** : cocher des cases, choisir un bouton radio, remplir les champs texte, ou ajouter une coche ✓ dans une case simplement imprimée.
 
 Basé sur [PyMuPDF](https://pymupdf.readthedocs.io/) pour le PDF et Tkinter (fourni avec Python) pour l'interface.
 
-## Installation
+## Application Windows (.exe)
+
+Téléchargez **[EditeurPDF.exe](https://github.com/alexisblush66-bot/Git-Repo-/releases/download/editeur-pdf/EditeurPDF.exe)** puis double-cliquez dessus : rien d'autre à installer.
+
+- Au premier lancement, Windows peut afficher « Windows a protégé votre ordinateur » (l'application n'est pas signée par un éditeur connu) : cliquez sur **Informations complémentaires**, puis **Exécuter quand même**.
+- Le démarrage prend quelques secondes.
+- Vous pouvez aussi faire glisser un PDF sur `EditeurPDF.exe` pour l'ouvrir directement.
+
+Le fichier est fabriqué automatiquement par GitHub (onglet *Actions*, « Application Windows ») à chaque mise à jour du code.
+
+## Installation (version Python)
 
 Python 3.10 ou plus récent est nécessaire.
 
@@ -32,8 +43,10 @@ Choisissez un **outil** dans la deuxième barre :
 |---|---|
 | **Ajouter du texte** | Cliquez à l'endroit voulu, tapez le texte, puis validez (Ctrl+Entrée). La taille et la couleur se règlent dans la barre d'outils. |
 | **Modifier le texte** | Le texte sous la souris est encadré en bleu. Cliquez dessus pour le corriger. |
+| **Cocher une case** | Cliquez sur une case imprimée (☐ ou petit carré, encadré en vert au survol) pour y mettre une coche ✓ ; recliquez pour la retirer. Ailleurs, la coche est placée là où vous cliquez (taille réglable). |
 | **Signer** | Au premier usage, dessinez votre signature (ou importez une image PNG). Ensuite, cliquez sur la page pour la poser, ou tracez un rectangle pour choisir sa taille. |
 
+- **Formulaires** : les vrais champs de formulaire (encadrés en vert au survol) réagissent quel que soit l'outil choisi, sauf Signer : un clic coche ou décoche une case, sélectionne un bouton radio, ou ouvre la saisie d'un champ texte ou d'une liste.
 - **Fusionner des PDF…** ajoute les pages d'autres PDF à la fin du document ouvert (sans document ouvert, crée un nouveau document).
 - **Annuler** (Ctrl+Z) revient en arrière, jusqu'à 30 étapes.
 - **Enregistrer** (Ctrl+S) écrase le fichier ouvert ; **Enregistrer sous…** crée une copie.

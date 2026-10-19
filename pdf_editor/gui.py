@@ -19,8 +19,10 @@ ZOOM_LEVELS = (0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 2.5, 3.0)
 MODES = {
     "texte": "Cliquez sur la page pour ajouter du texte.",
     "modifier": "Cliquez sur un texte existant pour le modifier.",
+    "cocher": "Cliquez sur une case pour la cocher ou la décocher (ou n'importe où pour ajouter une coche).",
     "signature": "Cliquez ou tracez un rectangle pour placer votre signature.",
 }
+FIELD_HINT = "Champ de formulaire « {} » : cliquez pour le remplir ou le cocher."
 
 
 class TextDialog(tk.Toplevel):
@@ -55,6 +57,37 @@ class TextDialog(tk.Toplevel):
     @classmethod
     def ask(cls, parent, title: str, initial: str = "") -> str | None:
         dialog = cls(parent, title, initial)
+        parent.wait_window(dialog)
+        return dialog.result
+
+
+class ChoiceDialog(tk.Toplevel):
+    """Choix d'une valeur dans une liste déroulante de formulaire."""
+
+    def __init__(self, parent, title: str, choices, initial: str = ""):
+        super().__init__(parent)
+        self.title(title)
+        self.transient(parent)
+        self.result: str | None = None
+        self.value = tk.StringVar(value=initial)
+        box = ttk.Combobox(self, textvariable=self.value, values=list(choices), width=40)
+        box.pack(fill="x", padx=8, pady=8)
+        buttons = ttk.Frame(self)
+        buttons.pack(fill="x", padx=8, pady=(0, 8))
+        ttk.Button(buttons, text="Annuler", command=self.destroy).pack(side="right")
+        ttk.Button(buttons, text="Valider", command=self._ok).pack(side="right", padx=4)
+        self.bind("<Return>", lambda e: self._ok())
+        self.bind("<Escape>", lambda e: self.destroy())
+        box.focus_set()
+        self.grab_set()
+
+    def _ok(self):
+        self.result = self.value.get()
+        self.destroy()
+
+    @classmethod
+    def ask(cls, parent, title: str, choices, initial: str = "") -> str | None:
+        dialog = cls(parent, title, choices, initial)
         parent.wait_window(dialog)
         return dialog.result
 
@@ -140,6 +173,8 @@ class PdfEditorApp:
 
         self._photo: tk.PhotoImage | None = None
         self._spans: list[core.TextSpan] | None = None
+        self._fields: list[core.FormField] | None = None
+        self._boxes: list[tuple] | None = None
         self._drag_start: tuple[float, float] | None = None
 
         self._build_ui()
@@ -177,6 +212,7 @@ class PdfEditorApp:
         ttk.Label(tools, text="Outil :").pack(side="left")
         for value, label in (("texte", "Ajouter du texte"),
                              ("modifier", "Modifier le texte"),
+                             ("cocher", "Cocher une case"),
                              ("signature", "Signer")):
             ttk.Radiobutton(tools, text=label, value=value, variable=self.mode,
                             command=self._set_mode_hint).pack(side="left", padx=4)
@@ -217,7 +253,10 @@ class PdfEditorApp:
     def _set_mode_hint(self):
         self.canvas.delete("hover")
         self.status.set(MODES[self.mode.get()])
-        self.canvas.configure(cursor="xterm" if self.mode.get() != "signature" else "crosshair")
+        self.canvas.configure(cursor=self._mode_cursor())
+
+    def _mode_cursor(self) -> str:
+        return {"signature": "crosshair", "cocher": "hand2"}.get(self.mode.get(), "xterm")
 
     def _update_title(self):
         name = self.path.name if self.path else "Sans titre"
@@ -306,7 +345,7 @@ class PdfEditorApp:
 
     def render(self):
         self.canvas.delete("all")
-        self._spans = None
+        self._spans = self._fields = self._boxes = None
         if self.doc is None or self.doc.page_count == 0:
             self.page_label.configure(text="")
             return
@@ -342,6 +381,16 @@ class PdfEditorApp:
             self._spans = core.get_text_spans(self.doc, self.page_number)
         return self._spans
 
+    def _current_fields(self) -> list[core.FormField]:
+        if self._fields is None:
+            self._fields = core.get_form_fields(self.doc, self.page_number)
+        return self._fields
+
+    def _current_boxes(self) -> list[tuple]:
+        if self._boxes is None:
+            self._boxes = core.find_boxes(self.doc, self.page_number)
+        return self._boxes
+
     # -------------------------------------------------------- historique --
 
     def _snapshot(self):
@@ -365,24 +414,51 @@ class PdfEditorApp:
 
     def on_motion(self, event):
         self.canvas.delete("hover")
-        if self.doc is None or self.mode.get() != "modifier":
+        mode = self.mode.get()
+        if self.doc is None or self.doc.page_count == 0 or mode == "signature":
             return
-        span = core.find_span(self._current_spans(), *self._page_point(event))
-        if span:
-            self.canvas.create_rectangle(*self._screen_rect(span.bbox), outline="#1a73e8",
-                                         width=2, tags="hover")
+        x, y = self._page_point(event)
+        field = core.field_at(self._current_fields(), x, y)
+        if field:
+            self._highlight(field.bbox, "#188038")
+            self.canvas.configure(cursor="hand2")
+            self.status.set(FIELD_HINT.format(field.name))
+            return
+        self.canvas.configure(cursor=self._mode_cursor())
+        if self.status.get().startswith("Champ de formulaire"):
+            self.status.set(MODES[mode])
+        if mode == "modifier":
+            span = core.find_span(self._current_spans(), x, y)
+            if span:
+                self._highlight(span.bbox, "#1a73e8")
+        elif mode == "cocher":
+            box = core.box_at(self._current_boxes(), x, y)
+            if box:
+                self._highlight(box, "#188038")
+
+    def _highlight(self, rect, color: str):
+        x0, y0, x1, y1 = self._screen_rect(rect)
+        self.canvas.create_rectangle(x0 - 2, y0 - 2, x1 + 2, y1 + 2, outline=color, width=2, tags="hover")
 
     def on_press(self, event):
         if self.doc is None or self.doc.page_count == 0:
             return
         x, y = self._page_point(event)
         mode = self.mode.get()
+        if mode != "signature":
+            # Les champs de formulaire réagissent quel que soit l'outil.
+            field = core.field_at(self._current_fields(), x, y)
+            if field:
+                self.fill_field(field)
+                return
         if mode == "texte":
             self.add_text_at(x, y)
         elif mode == "modifier":
             span = core.find_span(self._current_spans(), x, y)
             if span:
                 self.edit(span)
+        elif mode == "cocher":
+            self.check_at(x, y)
         else:
             self._drag_start = (x, y)
 
@@ -422,6 +498,30 @@ class PdfEditorApp:
             return
         self._apply(core.edit_span, self.doc, span, new_text.replace("\n", " "))
 
+    def fill_field(self, field: core.FormField):
+        if field.read_only:
+            self.status.set(f"Le champ « {field.name} » est en lecture seule.")
+            return
+        if field.kind in ("case", "radio"):
+            self._apply(core.toggle_field, self.doc, field)
+            return
+        title = f"Champ « {field.name} »" if field.name else "Champ de formulaire"
+        if field.kind == "liste":
+            value = ChoiceDialog.ask(self.root, title, field.choices, str(field.value))
+        else:
+            value = TextDialog.ask(self.root, title, str(field.value))
+        if value is not None and value != field.value:
+            self._apply(core.set_field, self.doc, field, value)
+
+    def check_at(self, x: float, y: float):
+        box = core.box_at(self._current_boxes(), x, y)
+        if box is None:  # pas de case détectée : coche centrée sur le clic
+            half = self._fontsize() / 2
+            box = (x - half, y - half, x + half, y + half)
+        checked = self._apply(core.toggle_check_mark, self.doc, self.page_number, box, color=self.color)
+        if checked is not None:
+            self.status.set("Case cochée." if checked else "Coche retirée.")
+
     def sign(self, rect: pymupdf.Rect):
         if self.signature is None and not self.choose_signature():
             return
@@ -454,14 +554,15 @@ class PdfEditorApp:
     def _apply(self, func, *args, **kwargs):
         self._snapshot()
         try:
-            func(*args, **kwargs)
+            result = func(*args, **kwargs)
         except Exception as exc:
             # On revient à l'état d'avant, au cas où l'action a échoué à mi-chemin.
             self.doc = pymupdf.open(stream=self.history.pop(), filetype="pdf")
             self.render()
             messagebox.showerror("Erreur", str(exc))
-            return
+            return None
         self._changed()
+        return result
 
 
 def run(path: str | None = None):

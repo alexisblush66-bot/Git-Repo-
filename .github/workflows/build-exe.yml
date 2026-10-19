@@ -1,0 +1,60 @@
+# Fabrique l'application Windows (EditeurPDF.exe) à chaque mise à jour du code
+# et la publie dans la release « editeur-pdf » du dépôt.
+name: Application Windows
+
+on:
+  push:
+    branches: [main, "claude/**"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-exe-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows-exe:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Installer les dépendances
+        run: python -m pip install -r requirements.txt pyinstaller pytest
+
+      - name: Tests
+        run: python -m pytest -q
+
+      - name: Fabriquer EditeurPDF.exe
+        run: >
+          pyinstaller --noconfirm --onefile --windowed
+          --name EditeurPDF --exclude-module numpy
+          editeur_pdf.py
+
+      - name: Vérifier que l'application démarre
+        shell: pwsh
+        run: |
+          python -c "import pymupdf; d = pymupdf.open(); d.new_page().insert_text((72, 72), 'Test'); d.save('test.pdf')"
+          $p = Start-Process -FilePath dist\EditeurPDF.exe -ArgumentList 'fusionner','fusion-test.pdf','test.pdf','test.pdf' -Wait -PassThru
+          if ($p.ExitCode -ne 0 -or -not (Test-Path fusion-test.pdf)) { Write-Error "L'exe ne fonctionne pas (code $($p.ExitCode))"; exit 1 }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: EditeurPDF
+          path: dist/EditeurPDF.exe
+
+      - name: Publier dans la release « editeur-pdf »
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete editeur-pdf --yes --cleanup-tag || true
+          gh release create editeur-pdf dist/EditeurPDF.exe \
+            --target "$GITHUB_SHA" \
+            --title "Éditeur PDF pour Windows" \
+            --notes "Téléchargez EditeurPDF.exe puis double-cliquez dessus. Version construite depuis la branche ${GITHUB_REF_NAME} (${GITHUB_SHA::7})."

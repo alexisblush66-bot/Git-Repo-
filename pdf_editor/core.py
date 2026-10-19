@@ -11,6 +11,7 @@ Conventions :
 from __future__ import annotations
 
 import math
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Sequence
@@ -343,3 +344,226 @@ def _standard_font(fontname: str, flags: int) -> str:
 
 def _rect_to_page(page: pymupdf.Page, rect: Sequence[float]) -> pymupdf.Rect:
     return (pymupdf.Rect(rect) * page.derotation_matrix).normalize()
+
+
+# --------------------------------------------------------------------------
+# Formulaires (vrais champs PDF : cases, boutons radio, zones de texte…)
+# --------------------------------------------------------------------------
+
+_FIELD_KINDS = {
+    pymupdf.PDF_WIDGET_TYPE_CHECKBOX: "case",
+    pymupdf.PDF_WIDGET_TYPE_RADIOBUTTON: "radio",
+    pymupdf.PDF_WIDGET_TYPE_TEXT: "texte",
+    pymupdf.PDF_WIDGET_TYPE_COMBOBOX: "liste",
+    pymupdf.PDF_WIDGET_TYPE_LISTBOX: "liste",
+}
+_FLAG_READ_ONLY = 1
+
+
+@dataclass(frozen=True)
+class FormField:
+    """Un champ de formulaire. `value` est un booléen pour les cases et
+    boutons radio, une chaîne pour les autres."""
+
+    page_number: int
+    xref: int
+    name: str
+    kind: str  # "case", "radio", "texte" ou "liste"
+    value: str | bool
+    bbox: tuple[float, float, float, float]  # coordonnées affichées
+    choices: tuple[str, ...] = ()
+    read_only: bool = False
+
+
+def get_form_fields(doc: pymupdf.Document, page_number: int) -> list[FormField]:
+    page = doc[page_number]
+    fields = []
+    for widget in page.widgets():
+        kind = _FIELD_KINDS.get(widget.field_type)
+        if kind is None:
+            continue
+        if kind in ("case", "radio"):
+            value = _button_state(doc, widget.xref) != "Off"
+        else:
+            value = widget.field_value or ""
+        fields.append(FormField(
+            page_number=page.number,
+            xref=widget.xref,
+            name=widget.field_name or "",
+            kind=kind,
+            value=value,
+            bbox=tuple(widget.rect * page.rotation_matrix),
+            choices=tuple(widget.choice_values or ()),
+            read_only=bool(widget.field_flags & _FLAG_READ_ONLY),
+        ))
+    return fields
+
+
+def field_at(fields: Iterable[FormField], x: float, y: float) -> FormField | None:
+    point = pymupdf.Point(x, y)
+    for field in fields:
+        if pymupdf.Rect(field.bbox).contains(point):
+            return field
+    return None
+
+
+def set_field(doc: pymupdf.Document, field: FormField, value: str | bool) -> None:
+    """Coche/décoche une case ou un bouton radio (value booléen), ou remplit
+    un champ texte ou une liste (value chaîne)."""
+    if field.read_only:
+        raise ValueError(f"Le champ « {field.name} » est en lecture seule.")
+    page = doc[field.page_number]
+    if field.kind in ("case", "radio"):
+        _set_button(doc, page, field.xref, bool(value))
+    else:
+        widget = page.load_widget(field.xref)
+        widget.field_value = str(value)
+        widget.update()
+
+
+def toggle_field(doc: pymupdf.Document, field: FormField) -> None:
+    """Inverse une case à cocher ; sélectionne un bouton radio."""
+    set_field(doc, field, True if field.kind == "radio" else not field.value)
+
+
+def _set_button(doc: pymupdf.Document, page: pymupdf.Page, xref: int, checked: bool) -> None:
+    on_state = _on_state(doc, xref)
+    if on_state is None:
+        # Case sans apparence prédéfinie : on laisse PyMuPDF la dessiner.
+        widget = page.load_widget(xref)
+        widget.field_value = widget.on_state() if checked else "Off"
+        widget.update()
+        return
+
+    # La valeur appartient au champ, qui est soit le widget lui-même, soit
+    # son parent (cas des groupes de boutons radio).
+    parent = _xref_of(doc.xref_get_key(xref, "Parent"))
+    has_name = doc.xref_get_key(xref, "T")[0] != "null"
+    field_xref = xref if parent is None or has_name else parent
+    kids = _xrefs_of(doc.xref_get_key(field_xref, "Kids")) if field_xref != xref else [xref]
+
+    value = f"/{on_state}" if checked else "/Off"
+    for kid in kids:
+        # Les autres boutons du groupe s'éteignent, sauf ceux qui partagent
+        # le même état (cases en double).
+        kid_on = kid == xref or _on_state(doc, kid) == on_state
+        doc.xref_set_key(kid, "AS", value if kid_on else "/Off")
+    doc.xref_set_key(field_xref, "V", value)
+
+
+def _button_state(doc: pymupdf.Document, xref: int) -> str:
+    kind, value = doc.xref_get_key(xref, "AS")
+    return value.lstrip("/") if kind == "name" else "Off"
+
+
+def _on_state(doc: pymupdf.Document, xref: int) -> str | None:
+    """Nom de l'état « coché » d'un bouton, lu dans ses apparences."""
+    kind, value = doc.xref_get_key(xref, "AP/N")
+    if kind == "xref":
+        ref = _xref_of((kind, value))
+        if doc.xref_is_stream(ref):
+            return None
+        value = doc.xref_object(ref, compressed=True)
+    elif kind != "dict":
+        return None
+    states = re.findall(r"/([^\s/<>\[\]()]+)\s*\d+\s+\d+\s+R", value)
+    return next((s for s in states if s != "Off"), None)
+
+
+def _xref_of(entry: tuple[str, str]) -> int | None:
+    kind, value = entry
+    return int(value.split()[0]) if kind == "xref" else None
+
+
+def _xrefs_of(entry: tuple[str, str]) -> list[int]:
+    return [int(n) for n in re.findall(r"(\d+)\s+\d+\s+R", entry[1])]
+
+
+# --------------------------------------------------------------------------
+# Coches dans des cases imprimées (sans champ de formulaire)
+# --------------------------------------------------------------------------
+
+CHECK_MARK_SUBJECT = "Coche"
+_BOX_GLYPHS = set("☐□❏❑❒▢◻⬜☑☒")
+
+
+def find_boxes(doc: pymupdf.Document, page_number: int) -> list[tuple[float, float, float, float]]:
+    """Repère les petits carrés dessinés (ou caractères « ☐ ») d'une page,
+    qui servent souvent de cases à cocher dans les PDF imprimables."""
+    page = doc[page_number]
+    rects = []
+    for drawing in page.get_drawings():
+        rects.append(drawing["rect"])
+        for item in drawing["items"]:
+            if item[0] == "re":
+                rects.append(item[1])
+            elif item[0] == "qu":
+                rects.append(item[1].rect)
+    for line in _text_lines(page):
+        for span in line["spans"]:
+            for char in span["chars"]:
+                if char["c"] in _BOX_GLYPHS:
+                    x0, _, x1, _ = char["bbox"]
+                    baseline = char["origin"][1]
+                    rects.append(pymupdf.Rect(x0, baseline - (x1 - x0), x1, baseline))
+    boxes = {tuple(round(v, 2) for v in (r * page.rotation_matrix).normalize())
+             for r in rects if _looks_like_box(r)}
+    return sorted(boxes)
+
+
+def box_at(boxes: Iterable[Sequence[float]], x: float, y: float, tolerance: float = 2) -> tuple | None:
+    """Renvoie la plus petite case contenant le point (x, y)."""
+    point = pymupdf.Point(x, y)
+    hits = [b for b in boxes
+            if (pymupdf.Rect(b) + (-tolerance, -tolerance, tolerance, tolerance)).contains(point)]
+    return min(hits, key=lambda b: pymupdf.Rect(b).get_area(), default=None)
+
+
+def add_check_mark(
+    doc: pymupdf.Document,
+    page_number: int,
+    rect: Sequence[float],
+    color: Color = BLACK,
+) -> None:
+    """Dessine une coche ✓ dans le rectangle donné (sous forme d'annotation,
+    ce qui permet de la retirer plus tard)."""
+    page = doc[page_number]
+    r = pymupdf.Rect(rect)
+    shape = [(0.18, 0.52), (0.42, 0.78), (0.84, 0.2)]
+    points = [tuple(pymupdf.Point(r.x0 + fx * r.width, r.y0 + fy * r.height) * page.derotation_matrix)
+              for fx, fy in shape]
+    annot = page.add_ink_annot([points])
+    annot.set_border(width=max(0.8, min(r.width, r.height) * 0.12))
+    annot.set_colors(stroke=color)
+    annot.set_info(subject=CHECK_MARK_SUBJECT)
+    annot.set_flags(pymupdf.PDF_ANNOT_IS_PRINT)
+    annot.update()
+
+
+def toggle_check_mark(
+    doc: pymupdf.Document,
+    page_number: int,
+    rect: Sequence[float],
+    color: Color = BLACK,
+) -> bool:
+    """Coche la case `rect`, ou retire la coche si elle y est déjà.
+    Renvoie True si la case est maintenant cochée."""
+    page = doc[page_number]
+    target = pymupdf.Rect(rect)
+    existing = [annot.xref for annot in page.annots(types=[pymupdf.PDF_ANNOT_INK])
+                if annot.info.get("subject") == CHECK_MARK_SUBJECT
+                and target.contains(_center(annot.rect * page.rotation_matrix))]
+    for xref in existing:
+        page.delete_annot(page.load_annot(xref))
+    if existing:
+        return False
+    add_check_mark(doc, page_number, target, color)
+    return True
+
+
+def _looks_like_box(r: pymupdf.Rect) -> bool:
+    return 4 <= r.width <= 40 and 4 <= r.height <= 40 and 0.7 <= r.width / r.height <= 1.4
+
+
+def _center(r: pymupdf.Rect) -> pymupdf.Point:
+    return pymupdf.Point((r.x0 + r.x1) / 2, (r.y0 + r.y1) / 2)
